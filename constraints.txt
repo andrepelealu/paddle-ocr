@@ -1,0 +1,2 @@
+# Prevent PyMuPDF from being installed
+PyMuPDF==0.0.0

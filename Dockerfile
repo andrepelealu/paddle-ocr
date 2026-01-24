@@ -11,9 +11,12 @@ RUN apt-get update && apt-get install -y \
 # Install pip packages individually
 RUN pip install --no-cache-dir -U pip setuptools wheel
 
+# Copy constraints file to prevent PyMuPDF
+COPY constraints.txt .
+
 # Install without PyMuPDF (use constraints to prevent it from being pulled)
 RUN pip install --no-cache-dir \
-    --constraint <(echo "PyMuPDF<0") \
+    --constraint constraints.txt \
     numpy==1.23.5 \
     opencv-python==4.6.0.66 \
     pdf2image==1.16.3 \
