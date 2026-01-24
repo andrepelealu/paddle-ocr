@@ -1,15 +1,18 @@
-FROM runpod/base:0.4.0-cuda11.8.0
+FROM python:3.11-slim-bullseye
 
 WORKDIR /app
 
-# Install ALL system dependencies needed for compilation
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    python3-dev \
+    git \
     poppler-utils \
     libffi-dev \
     libssl-dev \
-    git \
+    libjpeg-dev \
+    zlib1g-dev \
+    wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
