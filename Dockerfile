@@ -2,17 +2,20 @@ FROM runpod/base:0.4.0-cuda11.8.0
 
 WORKDIR /app
 
-# Install system dependencies
+# Install ALL system dependencies needed for compilation
 RUN apt-get update && apt-get install -y \
-    poppler-utils \
     build-essential \
     python3-dev \
+    poppler-utils \
+    libffi-dev \
+    libssl-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pip packages
-RUN pip install --no-cache-dir -U pip setuptools wheel
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install requirements (allow PyMuPDF to compile since it's a transitive dep)
+# Install requirements
 COPY requirements-serverless.txt .
 RUN pip install --no-cache-dir -r requirements-serverless.txt
 
