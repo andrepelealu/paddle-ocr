@@ -5,13 +5,15 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     poppler-utils \
-    swig \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only serverless requirements and install
+# Upgrade pip to latest
+RUN pip install --upgrade pip setuptools wheel
+
+# Install dependencies using only pre-built wheels (no compilation)
 COPY requirements-serverless.txt .
-RUN pip install --no-cache-dir -r requirements-serverless.txt
+RUN pip install --no-cache-dir --only-binary :all: -r requirements-serverless.txt || \
+    pip install --no-cache-dir -r requirements-serverless.txt
 
 # Copy handler
 COPY serverless_handler.py .
