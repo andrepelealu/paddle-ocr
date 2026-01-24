@@ -8,9 +8,12 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pip packages individually to control versions
-RUN pip install --no-cache-dir -U pip setuptools wheel && \
-    pip install --no-cache-dir \
+# Install pip packages individually
+RUN pip install --no-cache-dir -U pip setuptools wheel
+
+# Install without PyMuPDF (use constraints to prevent it from being pulled)
+RUN pip install --no-cache-dir \
+    --constraint <(echo "PyMuPDF<0") \
     numpy==1.23.5 \
     opencv-python==4.6.0.66 \
     pdf2image==1.16.3 \
