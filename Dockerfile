@@ -2,28 +2,19 @@ FROM runpod/base:0.4.0-cuda11.8.0
 
 WORKDIR /app
 
-# Install system dependencies ONLY
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     poppler-utils \
-    python3-pip \
+    build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pip packages individually
+# Install pip packages
 RUN pip install --no-cache-dir -U pip setuptools wheel
 
-# Copy constraints file to prevent PyMuPDF
-COPY constraints.txt .
-
-# Install without PyMuPDF (use constraints to prevent it from being pulled)
-RUN pip install --no-cache-dir \
-    --constraint constraints.txt \
-    numpy==1.23.5 \
-    opencv-python==4.6.0.66 \
-    pdf2image==1.16.3 \
-    paddlepaddle==2.6.2 \
-    paddleocr==2.7.0.3 \
-    runpod==0.4.2 \
-    requests==2.31.0
+# Install requirements (allow PyMuPDF to compile since it's a transitive dep)
+COPY requirements-serverless.txt .
+RUN pip install --no-cache-dir -r requirements-serverless.txt
 
 # Copy handler
 COPY serverless_handler.py .
