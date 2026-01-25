@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip
 
+# Install requests and its dependencies FIRST
+RUN pip install --no-cache-dir requests==2.31.0 urllib3==2.1.0 charset-normalizer==3.3.2 idna==3.6 certifi==2023.7.22
+
 # Install PyMuPDF binary wheel FIRST (pre-built)
 RUN pip install --no-cache-dir --only-binary :all: PyMuPDF==1.23.8 || true
 
