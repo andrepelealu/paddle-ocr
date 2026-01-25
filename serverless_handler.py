@@ -5,6 +5,11 @@ Accepts PDF URLs and returns extracted text as JSON
 
 import sys
 import os
+
+# Force headless mode for OpenCV before importing cv2
+os.environ['DISPLAY'] = ''
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
 import logging
 import traceback
 
