@@ -6,126 +6,54 @@ Accepts PDF URLs and returns extracted text as JSON
 import sys
 import os
 import logging
+import traceback
 
 # Configure logging FIRST
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout,
+    force=True
 )
 logger = logging.getLogger(__name__)
 
 logger.info("=== Starting PaddleOCR Serverless Handler ===")
 
-try:
-    logger.info("Importing dependencies...")
-    import runpod
-    from pdf2image import convert_from_path
-    from paddleocr import PaddleOCR
-    import cv2
-    import numpy as np
-    import tempfile
-    import traceback
-    import requests
-    from io import BytesIO
-    logger.info("All imports successful")
-except Exception as e:
-    logger.error(f"Import failed: {e}")
-    logger.error(traceback.format_exc())
-    sys.exit(1)
-
-# Initialize OCR once
+# Global OCR instance (lazy-loaded)
 ocr = None
-try:
-    logger.info("Initializing PaddleOCR...")
-    ocr = PaddleOCR(
-        use_angle_cls=True,
-        lang="en",
-        use_gpu=False  # Explicit CPU mode
-    )
-    logger.info("PaddleOCR initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize PaddleOCR: {e}")
-    logger.error(traceback.format_exc())
 
-def download_pdf(url):
-    """Download PDF from URL and return as bytes"""
-    try:
-        logger.info(f"Downloading PDF from: {url}")
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        logger.info(f"PDF downloaded successfully, size: {len(response.content)} bytes")
-        return BytesIO(response.content)
-    except Exception as e:
-        logger.error(f"Failed to download PDF: {e}")
-        raise Exception(f"Failed to download PDF from URL: {str(e)}")
-
-def process_pdf(pdf_file, filename):
-    """Process PDF file and extract text"""
-    try:
-        if not ocr:
-            raise Exception("OCR engine not initialized")
-        
-        logger.info(f"Converting PDF to images: {filename}")
-        # Convert PDF to images
-        pages = convert_from_path(pdf_file, dpi=300)
-        logger.info(f"Converted PDF to {len(pages)} pages")
-        
-        results = {
-            'filename': filename,
-            'total_pages': len(pages),
-            'pages': []
-        }
-        
-        # Process each page
-        for page_num, page in enumerate(pages):
-            try:
-                logger.info(f"Processing page {page_num + 1}/{len(pages)}")
-                img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-                ocr_result = ocr.ocr(img, cls=True)
-                
-                # Extract text
-                all_text = []
-                if ocr_result and ocr_result[0]:
-                    for line in ocr_result[0]:
-                        text = line[1][0]
-                        all_text.append(text)
-                
-                page_data = {
-                    'page_number': page_num + 1,
-                    'raw_text': '\n'.join(all_text)
-                }
-                
-                results['pages'].append(page_data)
-                logger.info(f"Page {page_num + 1} completed with {len(all_text)} text blocks")
-            
-            except Exception as e:
-                logger.error(f"Error processing page {page_num + 1}: {e}")
-                logger.error(traceback.format_exc())
-                raise Exception(f"Error processing page {page_num + 1}: {str(e)}")
-        
-        return results
-    
-    except Exception as e:
-        logger.error(f"Error processing PDF: {e}")
-        logger.error(traceback.format_exc())
-        raise
+def get_ocr():
+    """Lazy-load OCR engine on first use"""
+    global ocr
+    if ocr is None:
+        try:
+            logger.info("Initializing PaddleOCR (first use)...")
+            from paddleocr import PaddleOCR
+            ocr = PaddleOCR(
+                use_angle_cls=True,
+                lang="en",
+                use_gpu=False
+            )
+            logger.info("PaddleOCR initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize PaddleOCR: {e}")
+            logger.error(traceback.format_exc())
+            raise
+    return ocr
 
 def handler(job):
-    """
-    RunPod handler function
-    
-    Input format:
-    {
-        "input": {
-            "pdf_url": "https://example.com/document.pdf",
-            "filename": "document.pdf"  # optional
-        }
-    }
-    """
+    """RunPod handler function"""
     try:
-        logger.info(f"=== New job received ===")
-        job_input = job['input']
+        logger.info("=== Job received ===")
+        
+        # Import here to avoid startup failures
+        from pdf2image import convert_from_path
+        import cv2
+        import numpy as np
+        import requests
+        from io import BytesIO
+        
+        job_input = job.get('input', {})
         logger.info(f"Job input: {job_input}")
         
         # Validate input
@@ -137,29 +65,76 @@ def handler(job):
         pdf_url = job_input['pdf_url']
         filename = job_input.get('filename', 'document.pdf')
         
-        logger.info(f"Processing PDF from URL: {pdf_url}")
+        try:
+            # Download PDF
+            logger.info(f"Downloading PDF from: {pdf_url}")
+            response = requests.get(pdf_url, timeout=30)
+            response.raise_for_status()
+            pdf_bytes = BytesIO(response.content)
+            logger.info(f"PDF downloaded: {len(response.content)} bytes")
+            
+            # Convert PDF to images
+            logger.info("Converting PDF to images...")
+            pages = convert_from_path(pdf_bytes, dpi=300)
+            logger.info(f"Converted to {len(pages)} pages")
+            
+            results = {
+                'filename': filename,
+                'total_pages': len(pages),
+                'pages': []
+            }
+            
+            # Get OCR engine
+            ocr_engine = get_ocr()
+            
+            # Process each page
+            for page_num, page in enumerate(pages):
+                try:
+                    logger.info(f"Processing page {page_num + 1}/{len(pages)}")
+                    img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
+                    ocr_result = ocr_engine.ocr(img, cls=True)
+                    
+                    # Extract text
+                    all_text = []
+                    if ocr_result and ocr_result[0]:
+                        for line in ocr_result[0]:
+                            text = line[1][0]
+                            all_text.append(text)
+                    
+                    page_data = {
+                        'page_number': page_num + 1,
+                        'raw_text': '\n'.join(all_text)
+                    }
+                    
+                    results['pages'].append(page_data)
+                    logger.info(f"Page {page_num + 1} completed")
+                
+                except Exception as e:
+                    logger.error(f"Error processing page {page_num + 1}: {e}")
+                    logger.error(traceback.format_exc())
+                    raise
+            
+            logger.info(f"Successfully processed {filename}")
+            return results
         
-        # Download PDF
-        pdf_file = download_pdf(pdf_url)
-        
-        # Process PDF
-        results = process_pdf(pdf_file, filename)
-        
-        logger.info(f"Successfully processed {filename}")
-        return results
+        except Exception as e:
+            logger.error(f"Processing error: {e}")
+            logger.error(traceback.format_exc())
+            return {'error': str(e)}
     
     except Exception as e:
         logger.error(f"Handler error: {e}")
         logger.error(traceback.format_exc())
-        return {
-            'error': str(e)
-        }
+        return {'error': str(e)}
 
-# RunPod handler entry point
-logger.info("Starting RunPod serverless handler...")
-try:
-    runpod.serverless.start({"handler": handler})
-except Exception as e:
-    logger.error(f"Failed to start handler: {e}")
-    logger.error(traceback.format_exc())
-    sys.exit(1)
+# Test mode - verify handler can start
+if __name__ == "__main__":
+    logger.info("Handler script loaded successfully")
+    try:
+        import runpod
+        logger.info("RunPod imported successfully")
+        runpod.serverless.start({"handler": handler})
+    except Exception as e:
+        logger.error(f"Failed to start RunPod handler: {e}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
