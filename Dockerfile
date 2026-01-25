@@ -4,23 +4,21 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
     poppler-utils \
-    libffi-dev \
     libssl-dev \
-    libjpeg-dev \
-    zlib1g-dev \
-    wget \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir --upgrade pip
 
-# Install requirements
+# Install PyMuPDF binary wheel FIRST (pre-built)
+RUN pip install --no-cache-dir --only-binary :all: PyMuPDF==1.23.8 || true
+
+# Install other requirements
 COPY requirements-serverless.txt .
-RUN pip install --no-cache-dir -r requirements-serverless.txt
+RUN pip install --no-cache-dir --no-deps -r requirements-serverless.txt && \
+    pip install --no-cache-dir --only-binary :all: numpy opencv-python
 
 # Copy handler
 COPY serverless_handler.py .
