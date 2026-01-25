@@ -57,6 +57,7 @@ def handler(job):
         import numpy as np
         import requests
         from io import BytesIO
+        import tempfile
         
         job_input = job.get('input', {})
         logger.info(f"Job input: {job_input}")
@@ -75,52 +76,66 @@ def handler(job):
             logger.info(f"Downloading PDF from: {pdf_url}")
             response = requests.get(pdf_url, timeout=30)
             response.raise_for_status()
-            pdf_bytes = BytesIO(response.content)
             logger.info(f"PDF downloaded: {len(response.content)} bytes")
             
-            # Convert PDF to images
-            logger.info("Converting PDF to images...")
-            pages = convert_from_path(pdf_bytes, dpi=300)
-            logger.info(f"Converted to {len(pages)} pages")
+            # Save to temporary file (convert_from_path needs a file path, not BytesIO)
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+                tmp_file.write(response.content)
+                tmp_path = tmp_file.name
             
-            results = {
-                'filename': filename,
-                'total_pages': len(pages),
-                'pages': []
-            }
+            logger.info(f"PDF saved to temp file: {tmp_path}")
             
-            # Get OCR engine
-            ocr_engine = get_ocr()
-            
-            # Process each page
-            for page_num, page in enumerate(pages):
-                try:
-                    logger.info(f"Processing page {page_num + 1}/{len(pages)}")
-                    img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-                    ocr_result = ocr_engine.ocr(img, cls=True)
-                    
-                    # Extract text
-                    all_text = []
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            text = line[1][0]
-                            all_text.append(text)
-                    
-                    page_data = {
-                        'page_number': page_num + 1,
-                        'raw_text': '\n'.join(all_text)
-                    }
-                    
-                    results['pages'].append(page_data)
-                    logger.info(f"Page {page_num + 1} completed")
+            try:
+                # Convert PDF to images
+                logger.info("Converting PDF to images...")
+                pages = convert_from_path(tmp_path, dpi=300)
+                logger.info(f"Converted to {len(pages)} pages")
                 
-                except Exception as e:
-                    logger.error(f"Error processing page {page_num + 1}: {e}")
-                    logger.error(traceback.format_exc())
-                    raise
+                results = {
+                    'filename': filename,
+                    'total_pages': len(pages),
+                    'pages': []
+                }
+                
+                # Get OCR engine
+                ocr_engine = get_ocr()
+                
+                # Process each page
+                for page_num, page in enumerate(pages):
+                    try:
+                        logger.info(f"Processing page {page_num + 1}/{len(pages)}")
+                        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
+                        ocr_result = ocr_engine.ocr(img, cls=True)
+                        
+                        # Extract text
+                        all_text = []
+                        if ocr_result and ocr_result[0]:
+                            for line in ocr_result[0]:
+                                text = line[1][0]
+                                all_text.append(text)
+                        
+                        page_data = {
+                            'page_number': page_num + 1,
+                            'raw_text': '\n'.join(all_text)
+                        }
+                        
+                        results['pages'].append(page_data)
+                        logger.info(f"Page {page_num + 1} completed")
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing page {page_num + 1}: {e}")
+                        logger.error(traceback.format_exc())
+                        raise
+                
+                logger.info(f"Successfully processed {filename}")
+                return results
             
-            logger.info(f"Successfully processed {filename}")
-            return results
+            finally:
+                # Clean up temp file
+                import os as os_module
+                if os_module.path.exists(tmp_path):
+                    os_module.remove(tmp_path)
+                    logger.info(f"Cleaned up temp file: {tmp_path}")
         
         except Exception as e:
             logger.error(f"Processing error: {e}")
