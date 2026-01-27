@@ -1,3 +1,10 @@
+"""
+Flask OCR API - LOCAL DEVELOPMENT ONLY
+
+For production deployment, use serverless_handler.py with RunPod Serverless.
+This Flask app is useful for local testing and development.
+"""
+
 from flask import Flask, request, jsonify
 from pdf2image import convert_from_path
 from paddleocr import PaddleOCR
@@ -8,9 +15,13 @@ import os
 from werkzeug.utils import secure_filename
 import traceback
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
+# Configure logging - production ready
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -20,11 +31,13 @@ app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 # init OCR once
 try:
     ocr = PaddleOCR(
-        use_angle_cls=True,
+        use_angle_cls=False,  # Disabled for receipts (usually upright) - saves 30-50ms/page
         lang="en",  # change to "id" or "en+id" if needed
-        use_gpu=True  # Enable GPU if available (falls back to CPU if not)
+        use_gpu=True,  # Enable GPU if available (falls back to CPU if not)
+        det_db_thresh=0.3,  # Detection threshold
+        det_db_box_thresh=0.6,  # Box threshold for filtering noise
     )
-    logger.info("PaddleOCR initialized with GPU support")
+    print("✓ PaddleOCR initialized successfully")  # Startup info only
 except Exception as e:
     logger.error(f"Failed to initialize PaddleOCR: {e}")
     ocr = None
@@ -40,13 +53,14 @@ def is_image_file(filename):
     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
     return ext in IMAGE_EXTENSIONS
 
-def process_image(img, ocr_engine):
+def process_image(img, ocr_engine, max_dimension=1920):
     """
     Process a single image with OCR
 
     Args:
         img: PIL Image or numpy array
         ocr_engine: PaddleOCR instance
+        max_dimension: Maximum width/height in pixels (default 1920)
 
     Returns:
         str: Extracted raw text
@@ -57,14 +71,23 @@ def process_image(img, ocr_engine):
     else:
         img_array = img
 
+    # OPTIMIZATION: Resize large images to save processing time
+    height, width = img_array.shape[:2]
+    if max(height, width) > max_dimension:
+        scale = max_dimension / max(height, width)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        img_array = cv2.resize(img_array, (new_width, new_height),
+                              interpolation=cv2.INTER_AREA)
+
     # Convert RGB to BGR for OpenCV
     if len(img_array.shape) == 3 and img_array.shape[2] == 3:
         img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     else:
         img_bgr = img_array
 
-    # Run OCR
-    ocr_result = ocr_engine.ocr(img_bgr, cls=True)
+    # Run OCR (cls=False for receipts - they're usually upright)
+    ocr_result = ocr_engine.ocr(img_bgr, cls=False)
 
     # Extract text
     all_text = []
@@ -105,20 +128,46 @@ def process_file(file_path, filename, ocr_engine):
         # Process as PDF
         # Use 150 DPI for faster processing (200-300 for higher quality)
         pages = convert_from_path(file_path, dpi=150)
-        logger.info(f"Converted PDF to {len(pages)} pages")
 
         results = {
             'filename': filename,
             'total_pages': len(pages),
-            'pages': []
+            'pages': [None] * len(pages)  # Pre-allocate list
         }
 
-        for page_num, page in enumerate(pages):
-            raw_text = process_image(page, ocr_engine)
-            results['pages'].append({
-                'page_number': page_num + 1,
+        # OPTIMIZATION: Use parallel processing for multiple pages
+        if len(pages) > 1:
+            max_workers = min(4, len(pages))  # Limit to 4 workers
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all pages
+                future_to_page = {
+                    executor.submit(process_image, page, ocr_engine): page_num
+                    for page_num, page in enumerate(pages)
+                }
+
+                # Collect results as they complete
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        raw_text = future.result()
+                        results['pages'][page_num] = {
+                            'page_number': page_num + 1,
+                            'raw_text': raw_text
+                        }
+                    except Exception as e:
+                        logger.error(f"OCR failed for page {page_num + 1}: {e}")
+                        results['pages'][page_num] = {
+                            'page_number': page_num + 1,
+                            'raw_text': '',
+                            'error': str(e)
+                        }
+        else:
+            # Single page - no need for parallel processing
+            raw_text = process_image(pages[0], ocr_engine)
+            results['pages'][0] = {
+                'page_number': 1,
                 'raw_text': raw_text
-            })
+            }
 
         return results
 
@@ -156,13 +205,11 @@ def ocr_pdf():
 
         try:
             # Process file (PDF or image)
-            logger.info(f"Processing file: {temp_path}")
             results = process_file(temp_path, filename, ocr)
             return jsonify(results), 200
 
         except Exception as e:
-            logger.error(f"Error processing file: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Failed to process {filename}: {e}\n{traceback.format_exc()}")
             return jsonify({'error': f'File processing error: {str(e)}'}), 500
         
         finally:
@@ -171,8 +218,7 @@ def ocr_pdf():
                 os.remove(temp_path)
     
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Request failed: {e}\n{traceback.format_exc()}")
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/api/health', methods=['GET'])
@@ -219,7 +265,7 @@ def ocr_multiple_pdfs():
                 batch_results.append(results)
 
             except Exception as e:
-                logger.error(f"Error processing {filename}: {e}")
+                logger.error(f"Batch processing failed for {filename}: {e}")
                 batch_results.append({
                     'filename': filename,
                     'error': str(e)
@@ -232,26 +278,31 @@ def ocr_multiple_pdfs():
         return jsonify({'results': batch_results}), 200
     
     except Exception as e:
-        logger.error(f"Batch error: {e}")
+        logger.error(f"Batch request failed: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Expose public URL via ngrok on RunPod
+    print("\n" + "="*60)
+    print("🚀 Flask OCR API - LOCAL DEVELOPMENT MODE")
+    print("="*60)
+    print("For production, use: serverless_handler.py with RunPod Serverless")
+    print("Starting local server at http://localhost:5000")
+    print("="*60 + "\n")
+
+    # Expose public URL via ngrok (optional)
     try:
         from pyngrok import ngrok
         import os as os_module
-        
-        # Set your authtoken (get from https://dashboard.ngrok.com/get-started/your-authtoken)
+
         authtoken = os_module.getenv('NGROK_AUTHTOKEN')
         if authtoken:
             ngrok.set_auth_token(authtoken)
-        
-        public_url = ngrok.connect(5000)
-        print(f"\n{'='*60}")
-        print(f"PUBLIC API URL: {public_url}")
-        print(f"{'='*60}\n")
-    except Exception as e:
-        print(f"ngrok not available or not authenticated: {e}")
-        print("To use ngrok, set NGROK_AUTHTOKEN environment variable")
-    
+            public_url = ngrok.connect(5000)
+            print(f"\n{'='*60}")
+            print(f"PUBLIC API URL: {public_url}")
+            print(f"{'='*60}\n")
+    except Exception:
+        pass  # ngrok optional
+
+    # Local development server (NOT for production)
     app.run(debug=True, host='0.0.0.0', port=5000)
