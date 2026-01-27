@@ -37,9 +37,9 @@ def get_ocr():
             ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang="en",
-                use_gpu=False
+                use_gpu=True  # Enable GPU if available (falls back to CPU)
             )
-            logger.info("PaddleOCR initialized successfully")
+            logger.info("PaddleOCR initialized successfully with GPU support")
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}")
             logger.error(traceback.format_exc())
@@ -130,7 +130,8 @@ def process_file_from_bytes(file_bytes, filename, ocr_engine):
             tmp_path = tmp_file.name
 
         try:
-            pages = convert_from_path(tmp_path, dpi=300)
+            # Use 150 DPI for faster processing (200-300 for higher quality)
+            pages = convert_from_path(tmp_path, dpi=150)
 
             results = {
                 'filename': filename,

@@ -21,8 +21,10 @@ app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 try:
     ocr = PaddleOCR(
         use_angle_cls=True,
-        lang="en"  # change to "id" or "en+id" if needed
+        lang="en",  # change to "id" or "en+id" if needed
+        use_gpu=True  # Enable GPU if available (falls back to CPU if not)
     )
+    logger.info("PaddleOCR initialized with GPU support")
 except Exception as e:
     logger.error(f"Failed to initialize PaddleOCR: {e}")
     ocr = None
@@ -101,7 +103,8 @@ def process_file(file_path, filename, ocr_engine):
         }
     else:
         # Process as PDF
-        pages = convert_from_path(file_path, dpi=300)
+        # Use 150 DPI for faster processing (200-300 for higher quality)
+        pages = convert_from_path(file_path, dpi=150)
         logger.info(f"Converted PDF to {len(pages)} pages")
 
         results = {
