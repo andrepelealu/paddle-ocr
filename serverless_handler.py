@@ -46,6 +46,110 @@ def get_ocr():
             raise
     return ocr
 
+def is_image_url(url):
+    """Check if URL points to an image based on extension"""
+    url_lower = url.lower()
+    return any(url_lower.endswith(ext) for ext in ['.jpg', '.jpeg', '.png'])
+
+def process_image(img, ocr_engine):
+    """
+    Process a single image with OCR
+
+    Args:
+        img: PIL Image or numpy array
+        ocr_engine: PaddleOCR instance
+
+    Returns:
+        str: Extracted raw text
+    """
+    import cv2
+    import numpy as np
+
+    # Convert PIL to numpy if needed
+    if hasattr(img, 'mode'):  # PIL Image
+        img_array = np.array(img)
+    else:
+        img_array = img
+
+    # Convert RGB to BGR for OpenCV
+    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    else:
+        img_bgr = img_array
+
+    # Run OCR
+    ocr_result = ocr_engine.ocr(img_bgr, cls=True)
+
+    # Extract text
+    all_text = []
+    if ocr_result and ocr_result[0]:
+        for line in ocr_result[0]:
+            text = line[1][0]
+            all_text.append(text)
+
+    return '\n'.join(all_text)
+
+def process_file_from_bytes(file_bytes, filename, ocr_engine):
+    """
+    Process file from bytes (PDF or image)
+
+    Args:
+        file_bytes: File content as bytes
+        filename: Original filename
+        ocr_engine: PaddleOCR instance
+
+    Returns:
+        dict: Results in standard format
+    """
+    import tempfile
+    from PIL import Image
+    from io import BytesIO
+    from pdf2image import convert_from_path
+    import os
+
+    # Determine file type
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+
+    if ext in ['jpg', 'jpeg', 'png']:
+        # Process as image
+        img = Image.open(BytesIO(file_bytes))
+        raw_text = process_image(img, ocr_engine)
+
+        return {
+            'filename': filename,
+            'total_pages': 1,
+            'pages': [{
+                'page_number': 1,
+                'raw_text': raw_text
+            }]
+        }
+    else:
+        # Process as PDF - requires temp file
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+            tmp_file.write(file_bytes)
+            tmp_path = tmp_file.name
+
+        try:
+            pages = convert_from_path(tmp_path, dpi=300)
+
+            results = {
+                'filename': filename,
+                'total_pages': len(pages),
+                'pages': []
+            }
+
+            for page_num, page in enumerate(pages):
+                raw_text = process_image(page, ocr_engine)
+                results['pages'].append({
+                    'page_number': page_num + 1,
+                    'raw_text': raw_text
+                })
+
+            return results
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 def handler(job):
     """RunPod handler function"""
     try:
@@ -64,78 +168,30 @@ def handler(job):
         
         # Validate input
         if 'pdf_url' not in job_input:
-            error_msg = 'Missing required field: pdf_url'
+            error_msg = 'Missing required field: pdf_url (can be PDF or image URL)'
             logger.error(error_msg)
             return {'error': error_msg}
-        
+
         pdf_url = job_input['pdf_url']
-        filename = job_input.get('filename', 'document.pdf')
+        default_filename = 'receipt.jpg' if is_image_url(pdf_url) else 'document.pdf'
+        filename = job_input.get('filename', default_filename)
         
         try:
-            # Download PDF
-            logger.info(f"Downloading PDF from: {pdf_url}")
+            # Download file
+            logger.info(f"Downloading file from: {pdf_url}")
             response = requests.get(pdf_url, timeout=30)
             response.raise_for_status()
-            logger.info(f"PDF downloaded: {len(response.content)} bytes")
-            
-            # Save to temporary file (convert_from_path needs a file path, not BytesIO)
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-                tmp_file.write(response.content)
-                tmp_path = tmp_file.name
-            
-            logger.info(f"PDF saved to temp file: {tmp_path}")
-            
-            try:
-                # Convert PDF to images
-                logger.info("Converting PDF to images...")
-                pages = convert_from_path(tmp_path, dpi=300)
-                logger.info(f"Converted to {len(pages)} pages")
-                
-                results = {
-                    'filename': filename,
-                    'total_pages': len(pages),
-                    'pages': []
-                }
-                
-                # Get OCR engine
-                ocr_engine = get_ocr()
-                
-                # Process each page
-                for page_num, page in enumerate(pages):
-                    try:
-                        logger.info(f"Processing page {page_num + 1}/{len(pages)}")
-                        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-                        ocr_result = ocr_engine.ocr(img, cls=True)
-                        
-                        # Extract text
-                        all_text = []
-                        if ocr_result and ocr_result[0]:
-                            for line in ocr_result[0]:
-                                text = line[1][0]
-                                all_text.append(text)
-                        
-                        page_data = {
-                            'page_number': page_num + 1,
-                            'raw_text': '\n'.join(all_text)
-                        }
-                        
-                        results['pages'].append(page_data)
-                        logger.info(f"Page {page_num + 1} completed")
-                    
-                    except Exception as e:
-                        logger.error(f"Error processing page {page_num + 1}: {e}")
-                        logger.error(traceback.format_exc())
-                        raise
-                
-                logger.info(f"Successfully processed {filename}")
-                return results
-            
-            finally:
-                # Clean up temp file
-                import os as os_module
-                if os_module.path.exists(tmp_path):
-                    os_module.remove(tmp_path)
-                    logger.info(f"Cleaned up temp file: {tmp_path}")
+            logger.info(f"File downloaded: {len(response.content)} bytes")
+
+            # Get OCR engine
+            ocr_engine = get_ocr()
+
+            # Process file (PDF or image)
+            logger.info(f"Processing {filename}")
+            results = process_file_from_bytes(response.content, filename, ocr_engine)
+            logger.info(f"Successfully processed {filename}")
+
+            return results
         
         except Exception as e:
             logger.error(f"Processing error: {e}")

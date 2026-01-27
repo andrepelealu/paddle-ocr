@@ -27,19 +27,106 @@ except Exception as e:
     logger.error(f"Failed to initialize PaddleOCR: {e}")
     ocr = None
 
-ALLOWED_EXTENSIONS = {'pdf'}
+ALLOWED_EXTENSIONS = {'pdf', 'jpg', 'jpeg', 'png'}
+IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def is_image_file(filename):
+    """Check if file is an image based on extension"""
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+    return ext in IMAGE_EXTENSIONS
+
+def process_image(img, ocr_engine):
+    """
+    Process a single image with OCR
+
+    Args:
+        img: PIL Image or numpy array
+        ocr_engine: PaddleOCR instance
+
+    Returns:
+        str: Extracted raw text
+    """
+    # Convert PIL to numpy if needed
+    if hasattr(img, 'mode'):  # PIL Image
+        img_array = np.array(img)
+    else:
+        img_array = img
+
+    # Convert RGB to BGR for OpenCV
+    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    else:
+        img_bgr = img_array
+
+    # Run OCR
+    ocr_result = ocr_engine.ocr(img_bgr, cls=True)
+
+    # Extract text
+    all_text = []
+    if ocr_result and ocr_result[0]:
+        for line in ocr_result[0]:
+            text = line[1][0]
+            all_text.append(text)
+
+    return '\n'.join(all_text)
+
+def process_file(file_path, filename, ocr_engine):
+    """
+    Process either PDF or image file
+
+    Args:
+        file_path: Path to file
+        filename: Original filename
+        ocr_engine: PaddleOCR instance
+
+    Returns:
+        dict: Results in standard format
+    """
+    if is_image_file(filename):
+        # Process as image
+        from PIL import Image
+        img = Image.open(file_path)
+        raw_text = process_image(img, ocr_engine)
+
+        return {
+            'filename': filename,
+            'total_pages': 1,
+            'pages': [{
+                'page_number': 1,
+                'raw_text': raw_text
+            }]
+        }
+    else:
+        # Process as PDF
+        pages = convert_from_path(file_path, dpi=300)
+        logger.info(f"Converted PDF to {len(pages)} pages")
+
+        results = {
+            'filename': filename,
+            'total_pages': len(pages),
+            'pages': []
+        }
+
+        for page_num, page in enumerate(pages):
+            raw_text = process_image(page, ocr_engine)
+            results['pages'].append({
+                'page_number': page_num + 1,
+                'raw_text': raw_text
+            })
+
+        return results
+
 @app.route('/api/ocr', methods=['POST'])
 def ocr_pdf():
     """
-    API endpoint to extract text from PDF using PaddleOCR
-    
+    API endpoint to extract text from PDF or images using PaddleOCR
+
     Request:
-        - multipart/form-data with 'file' field containing PDF
-        
+        - multipart/form-data with 'file' field containing PDF or image
+
     Response:
         - JSON with pages array containing text and confidence scores
     """
@@ -57,58 +144,23 @@ def ocr_pdf():
             return jsonify({'error': 'No selected file'}), 400
         
         if not allowed_file(file.filename):
-            return jsonify({'error': 'Only PDF files are allowed'}), 400
+            return jsonify({'error': 'Only PDF and image files (JPG, PNG) are allowed'}), 400
         
         # Save temporarily
         filename = secure_filename(file.filename)
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(temp_path)
-        logger.info(f"Processing file: {temp_path}")
-        
+
         try:
-            # Convert PDF to images
-            pages = convert_from_path(temp_path, dpi=300)
-            logger.info(f"Converted PDF to {len(pages)} pages")
-            
-            results = {
-                'filename': filename,
-                'total_pages': len(pages),
-                'pages': []
-            }
-            
-            # Process each page
-            for page_num, page in enumerate(pages):
-                try:
-                    logger.info(f"Processing page {page_num + 1}")
-                    img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-                    ocr_result = ocr.ocr(img, cls=True)
-                    
-                    # Extract text
-                    all_text = []
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            text = line[1][0]
-                            all_text.append(text)
-                    
-                    page_data = {
-                        'page_number': page_num + 1,
-                        'raw_text': '\n'.join(all_text)
-                    }
-                    
-                    results['pages'].append(page_data)
-                    logger.info(f"Page {page_num + 1} completed with {len(all_text)} text blocks")
-                
-                except Exception as e:
-                    logger.error(f"Error processing page {page_num + 1}: {e}")
-                    logger.error(traceback.format_exc())
-                    return jsonify({'error': f'Error processing page {page_num + 1}: {str(e)}'}), 500
-            
+            # Process file (PDF or image)
+            logger.info(f"Processing file: {temp_path}")
+            results = process_file(temp_path, filename, ocr)
             return jsonify(results), 200
-        
+
         except Exception as e:
-            logger.error(f"Error converting PDF: {e}")
+            logger.error(f"Error processing file: {e}")
             logger.error(traceback.format_exc())
-            return jsonify({'error': f'PDF conversion error: {str(e)}'}), 500
+            return jsonify({'error': f'File processing error: {str(e)}'}), 500
         
         finally:
             # Clean up temp file
@@ -158,36 +210,11 @@ def ocr_multiple_pdfs():
             filename = secure_filename(file.filename)
             temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(temp_path)
-            
+
             try:
-                pages = convert_from_path(temp_path, dpi=300)
-                
-                file_result = {
-                    'filename': filename,
-                    'total_pages': len(pages),
-                    'pages': []
-                }
-                
-                for page_num, page in enumerate(pages):
-                    img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-                    ocr_result = ocr.ocr(img, cls=True)
-                    
-                    # Extract text
-                    all_text = []
-                    if ocr_result and ocr_result[0]:
-                        for line in ocr_result[0]:
-                            text = line[1][0]
-                            all_text.append(text)
-                    
-                    page_data = {
-                        'page_number': page_num + 1,
-                        'raw_text': '\n'.join(all_text)
-                    }
-                    
-                    file_result['pages'].append(page_data)
-                
-                batch_results.append(file_result)
-            
+                results = process_file(temp_path, filename, ocr)
+                batch_results.append(results)
+
             except Exception as e:
                 logger.error(f"Error processing {filename}: {e}")
                 batch_results.append({
