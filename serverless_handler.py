@@ -41,11 +41,13 @@ def get_ocr():
         try:
             from paddleocr import PaddleOCR
             ocr = PaddleOCR(
-                use_angle_cls=False,  # Disabled for receipts (usually upright) - saves 30-50ms/page
+                use_angle_cls=False,  # Disabled for receipts (saves 30-50ms/page)
                 lang="en",
-                use_gpu=True,  # Enable GPU if available (falls back to CPU)
+                use_gpu=True,  # GPU acceleration enabled
+                gpu_mem=500,  # Limit GPU memory per worker (MB)
                 det_db_thresh=0.3,  # Detection threshold
                 det_db_box_thresh=0.6,  # Box threshold for filtering noise
+                enable_mkldnn=False,  # Disable for GPU (CPU optimization)
             )
             print("✓ PaddleOCR initialized successfully")  # Startup info only
         except Exception as e:
