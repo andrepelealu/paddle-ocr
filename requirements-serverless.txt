@@ -1,6 +1,6 @@
 pdf2image==1.16.3
 paddleocr==2.7.0.3
-paddlepaddle-gpu==2.6.2.post118  # GPU version for CUDA 11.8
+paddlepaddle-gpu==2.6.2  # GPU version (supports CUDA 11.2-11.8)
 opencv-python-headless==4.6.0.66  # Headless version for serverless
 numpy<2.0
 runpod>=0.4.0
