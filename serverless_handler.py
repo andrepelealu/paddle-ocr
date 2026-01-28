@@ -151,6 +151,7 @@ def handler(job):
     try:
         import requests
         from PIL import Image
+        from urllib.parse import urlparse
 
         job_input = job.get("input", {})
         url = job_input.get("pdf_url")
@@ -165,8 +166,17 @@ def handler(job):
 
         ocr_engine = get_ocr()
 
+        # Detect file type: check filename first, then URL path (before query params)
+        file_lower = filename.lower()
+        url_path = urlparse(url).path.lower()
+
+        is_image = (
+            file_lower.endswith((".jpg", ".jpeg", ".png")) or
+            url_path.endswith((".jpg", ".jpeg", ".png"))
+        )
+
         # Image
-        if url.lower().endswith((".jpg", ".jpeg", ".png")):
+        if is_image:
             img = Image.open(BytesIO(resp.content))
             pages = ocr_images([img], ocr_engine)
             return {
