@@ -16,6 +16,7 @@ os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
 import logging
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging - production ready
 logging.basicConfig(
@@ -200,7 +201,6 @@ def handler(job):
         import requests
         from io import BytesIO
         import tempfile
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         job_input = job.get('input', {})
 
