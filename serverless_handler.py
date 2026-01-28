@@ -14,6 +14,10 @@ import os
 os.environ['DISPLAY'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
+# PaddlePaddle GPU optimization settings
+os.environ['FLAGS_allocator_strategy'] = 'auto_growth'  # Prevent memory fragmentation
+os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.8'  # Use up to 80% GPU memory
+
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
