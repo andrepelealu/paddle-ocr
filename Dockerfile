@@ -1,18 +1,12 @@
-# Use CUDA-enabled base image for GPU support
 FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
-
-# Install Python 3.11
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-distutils \
-    python3-pip \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install system dependencies INCLUDING graphics libraries for OpenCV
+# Install Python 3.11 and system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
     build-essential \
     git \
     swig \
@@ -27,14 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender-dev \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Install all requirements with dependencies
 COPY requirements-serverless.txt .
-RUN pip install --no-cache-dir -r requirements-serverless.txt
+RUN python -m pip install --no-cache-dir -r requirements-serverless.txt
 
 # Copy handler
 COPY serverless_handler.py .
