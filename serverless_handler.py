@@ -14,9 +14,11 @@ import os
 os.environ['DISPLAY'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
-# PaddlePaddle GPU optimization settings
+# PaddlePaddle GPU optimization settings for 24GB VRAM
 os.environ['FLAGS_allocator_strategy'] = 'auto_growth'  # Prevent memory fragmentation
-os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.8'  # Use up to 80% GPU memory
+os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.95'  # Use up to 95% of 24GB VRAM
+os.environ['FLAGS_cudnn_exhaustive_search'] = '1'  # Find fastest algorithms
+os.environ['FLAGS_cudnn_deterministic'] = '0'  # Allow non-deterministic for speed
 
 import logging
 import traceback
@@ -40,16 +42,30 @@ def get_ocr():
     if ocr is None:
         try:
             from paddleocr import PaddleOCR
+            import paddle
+
+            # Verify GPU is available
+            if paddle.is_compiled_with_cuda():
+                print(f"✓ CUDA available: {paddle.version.cuda()}")
+                print(f"✓ GPU devices: {paddle.device.cuda.device_count()}")
+            else:
+                print("✗ WARNING: PaddlePaddle NOT compiled with CUDA!")
+
             ocr = PaddleOCR(
                 use_angle_cls=False,  # Disabled for receipts (saves 30-50ms/page)
                 lang="en",
                 use_gpu=True,  # GPU acceleration enabled
-                gpu_mem=500,  # Limit GPU memory per worker (MB)
+                gpu_mem=12000,  # 12GB allocation for 24GB VRAM
                 det_db_thresh=0.3,  # Detection threshold
                 det_db_box_thresh=0.6,  # Box threshold for filtering noise
-                enable_mkldnn=False,  # Disable for GPU (CPU optimization)
+                enable_mkldnn=False,  # Disable for GPU
+                use_mp=False,  # Disable multiprocessing (conflicts with GPU)
+                show_log=False,
+                # Batch processing settings
+                det_db_unclip_ratio=1.5,  # Slightly expand text boxes
+                use_dilation=True,  # Better detection
             )
-            print("✓ PaddleOCR initialized successfully")  # Startup info only
+            print("✓ PaddleOCR initialized with 12GB GPU allocation (24GB VRAM available)")
         except Exception as e:
             logger.error(f"Failed to initialize PaddleOCR: {e}\n{traceback.format_exc()}")
             raise
@@ -60,7 +76,7 @@ def is_image_url(url):
     url_lower = url.lower()
     return any(url_lower.endswith(ext) for ext in ['.jpg', '.jpeg', '.png'])
 
-def process_image(img, ocr_engine, max_dimension=1920):
+def process_image(img, ocr_engine, max_dimension=2560):
     """
     Process a single image with OCR
 
@@ -158,17 +174,16 @@ def process_file_from_bytes(file_bytes, filename, ocr_engine):
                 'pages': [None] * len(pages)  # Pre-allocate list
             }
 
-            # OPTIMIZATION: Use parallel processing for multiple pages
+            # With 24GB VRAM, we can process multiple pages in parallel safely
+            # Use smaller worker pool to avoid memory conflicts
             if len(pages) > 1:
-                max_workers = min(4, len(pages))  # Limit to 4 workers
+                max_workers = min(3, len(pages))  # 3 concurrent workers for 24GB VRAM
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    # Submit all pages
                     future_to_page = {
                         executor.submit(process_image, page, ocr_engine): page_num
                         for page_num, page in enumerate(pages)
                     }
 
-                    # Collect results as they complete
                     for future in as_completed(future_to_page):
                         page_num = future_to_page[future]
                         try:
@@ -185,7 +200,7 @@ def process_file_from_bytes(file_bytes, filename, ocr_engine):
                                 'error': str(e)
                             }
             else:
-                # Single page - no need for parallel processing
+                # Single page
                 raw_text = process_image(pages[0], ocr_engine)
                 results['pages'][0] = {
                     'page_number': 1,
