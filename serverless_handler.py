@@ -102,9 +102,9 @@ def pdf_to_images(pdf_bytes):
 
 
 # -----------------------
-# Core OCR logic (BATCHED)
+# Core OCR logic (OPTIMIZED)
 # -----------------------
-def ocr_images(images, ocr_engine, max_batch=16):
+def ocr_images(images, ocr_engine):
     from concurrent.futures import ThreadPoolExecutor
 
     # Parallel CPU preprocessing for better performance
@@ -114,49 +114,32 @@ def ocr_images(images, ocr_engine, max_batch=16):
     else:
         batch = [preprocess_image(images[0])]
 
-    # Process in chunks if too many images to prevent OOM
-    if len(batch) > max_batch:
-        all_results = []
-        for i in range(0, len(batch), max_batch):
-            chunk = batch[i:i+max_batch]
-            try:
-                results = ocr_engine.ocr(chunk, cls=False)
-                all_results.extend(results)
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning(f"OOM on chunk {i//max_batch + 1}, falling back to single image processing")
-                    # Fallback: process images one by one
-                    for img in chunk:
-                        results = ocr_engine.ocr([img], cls=False)
-                        all_results.extend(results)
-                else:
-                    raise
-        results = all_results
-    else:
-        try:
-            results = ocr_engine.ocr(batch, cls=False)
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.warning("OOM detected, falling back to single image processing")
-                # Fallback: process images one by one
-                results = []
-                for img in batch:
-                    result = ocr_engine.ocr([img], cls=False)
-                    results.extend(result)
-            else:
-                raise
-
+    # Process each image individually with TensorRT optimization
+    # Note: PaddleOCR with TensorRT has issues with batch processing via the API
+    # but still benefits from internal TensorRT optimizations per image
     pages = []
-    for i, page in enumerate(results):
-        text = []
-        if page:
-            for line in page:
-                text.append(line[1][0])
+    for i, img in enumerate(batch):
+        try:
+            # Process single image
+            result = ocr_engine.ocr(img, cls=False)
 
-        pages.append({
-            "page_number": i + 1,
-            "raw_text": "\n".join(text)
-        })
+            text = []
+            if result and result[0]:
+                for line in result[0]:
+                    text.append(line[1][0])
+
+            pages.append({
+                "page_number": i + 1,
+                "raw_text": "\n".join(text)
+            })
+
+        except Exception as e:
+            logger.error(f"OCR failed for page {i + 1}: {e}")
+            pages.append({
+                "page_number": i + 1,
+                "raw_text": "",
+                "error": str(e)
+            })
 
     return pages
 
