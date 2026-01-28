@@ -135,39 +135,21 @@ def process_file(file_path, filename, ocr_engine):
             'pages': [None] * len(pages)  # Pre-allocate list
         }
 
-        # OPTIMIZATION: Use parallel processing for multiple pages
-        if len(pages) > 1:
-            max_workers = min(4, len(pages))  # Limit to 4 workers
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all pages
-                future_to_page = {
-                    executor.submit(process_image, page, ocr_engine): page_num
-                    for page_num, page in enumerate(pages)
+        # Process pages sequentially (parallel causes GPU memory conflicts)
+        for page_num, page in enumerate(pages):
+            try:
+                raw_text = process_image(page, ocr_engine)
+                results['pages'][page_num] = {
+                    'page_number': page_num + 1,
+                    'raw_text': raw_text
                 }
-
-                # Collect results as they complete
-                for future in as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    try:
-                        raw_text = future.result()
-                        results['pages'][page_num] = {
-                            'page_number': page_num + 1,
-                            'raw_text': raw_text
-                        }
-                    except Exception as e:
-                        logger.error(f"OCR failed for page {page_num + 1}: {e}")
-                        results['pages'][page_num] = {
-                            'page_number': page_num + 1,
-                            'raw_text': '',
-                            'error': str(e)
-                        }
-        else:
-            # Single page - no need for parallel processing
-            raw_text = process_image(pages[0], ocr_engine)
-            results['pages'][0] = {
-                'page_number': 1,
-                'raw_text': raw_text
-            }
+            except Exception as e:
+                logger.error(f"OCR failed for page {page_num + 1}: {e}")
+                results['pages'][page_num] = {
+                    'page_number': page_num + 1,
+                    'raw_text': '',
+                    'error': str(e)
+                }
 
         return results
 

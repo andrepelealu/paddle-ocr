@@ -1,262 +1,217 @@
-"""
-RunPod Serverless Handler - PRODUCTION
-
-This is the production deployment for RunPod Serverless.
-Accepts PDF/image URLs and returns extracted text as JSON.
-
-For local development/testing, use ocr_pdf.py instead.
-"""
-
-import sys
 import os
+import sys
+import logging
+import traceback
+from io import BytesIO
 
-# Force headless mode for OpenCV before importing cv2
 os.environ['DISPLAY'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
-# PaddlePaddle GPU optimization settings for 24GB VRAM
-os.environ['FLAGS_allocator_strategy'] = 'auto_growth'  # Prevent memory fragmentation
-os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.95'  # Use up to 95% of 24GB VRAM
-os.environ['FLAGS_cudnn_exhaustive_search'] = '1'  # Find fastest algorithms
-os.environ['FLAGS_cudnn_deterministic'] = '0'  # Allow non-deterministic for speed
+# Paddle GPU optimization
+os.environ['FLAGS_allocator_strategy'] = 'auto_growth'
+os.environ['FLAGS_fraction_of_gpu_memory_to_use'] = '0.85'  # More headroom to prevent OOM
+os.environ['FLAGS_cudnn_exhaustive_search'] = '1'
+os.environ['FLAGS_cudnn_deterministic'] = '0'
 
-import logging
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Configure logging - production ready
 logging.basicConfig(
     level=logging.WARNING,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout,
-    force=True
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
 )
+
 logger = logging.getLogger(__name__)
 
-# Global OCR instance (lazy-loaded)
 ocr = None
 
+
+# -----------------------
+# Lazy OCR init (GPU)
+# -----------------------
 def get_ocr():
-    """Lazy-load OCR engine on first use"""
     global ocr
     if ocr is None:
         try:
-            from paddleocr import PaddleOCR
             import paddle
+            from paddleocr import PaddleOCR
 
-            # Verify GPU is available
-            if paddle.is_compiled_with_cuda():
-                print(f"✓ CUDA available: {paddle.version.cuda()}")
-                print(f"✓ GPU devices: {paddle.device.cuda.device_count()}")
-            else:
-                print("✗ WARNING: PaddlePaddle NOT compiled with CUDA!")
+            if not paddle.is_compiled_with_cuda():
+                raise RuntimeError("Paddle is NOT compiled with CUDA")
 
             ocr = PaddleOCR(
-                use_angle_cls=False,  # Disabled for receipts (saves 30-50ms/page)
+                use_gpu=True,
                 lang="en",
-                use_gpu=True,  # GPU acceleration enabled
-                gpu_mem=12000,  # 12GB allocation for 24GB VRAM
-                det_db_thresh=0.3,  # Detection threshold
-                det_db_box_thresh=0.6,  # Box threshold for filtering noise
-                enable_mkldnn=False,  # Disable for GPU
-                use_mp=False,  # Disable multiprocessing (conflicts with GPU)
+                use_angle_cls=False,
+                gpu_mem=22000,          # use almost all 24GB
+                use_tensorrt=True,      # BIG speedup
+                precision="fp16",
+                enable_mkldnn=False,
                 show_log=False,
-                # Batch processing settings
-                det_db_unclip_ratio=1.5,  # Slightly expand text boxes
-                use_dilation=True,  # Better detection
+                use_dilation=False,
+                rec_batch_num=16,       # Process 16 text regions at once
+                det_db_thresh=0.3,      # Detection threshold
+                det_db_box_thresh=0.6,  # Box filtering threshold
+                max_batch_size=16,      # TensorRT max batch size
             )
-            print("✓ PaddleOCR initialized with 12GB GPU allocation (24GB VRAM available)")
+
+            print("✓ PaddleOCR initialized (GPU, FP16, TensorRT)")
         except Exception as e:
-            logger.error(f"Failed to initialize PaddleOCR: {e}\n{traceback.format_exc()}")
+            logger.error(f"OCR init failed: {e}")
             raise
     return ocr
 
-def is_image_url(url):
-    """Check if URL points to an image based on extension"""
-    url_lower = url.lower()
-    return any(url_lower.endswith(ext) for ext in ['.jpg', '.jpeg', '.png'])
 
-def process_image(img, ocr_engine, max_dimension=2560):
-    """
-    Process a single image with OCR
-
-    Args:
-        img: PIL Image or numpy array
-        ocr_engine: PaddleOCR instance
-        max_dimension: Maximum width/height in pixels (default 1920)
-
-    Returns:
-        str: Extracted raw text
-    """
-    import cv2
+# -----------------------
+# Image preprocessing
+# -----------------------
+def preprocess_image(img, max_dim=2560):
     import numpy as np
-
-    # Convert PIL to numpy if needed
-    if hasattr(img, 'mode'):  # PIL Image
-        img_array = np.array(img)
-    else:
-        img_array = img
-
-    # OPTIMIZATION: Resize large images to save processing time
-    height, width = img_array.shape[:2]
-    if max(height, width) > max_dimension:
-        scale = max_dimension / max(height, width)
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-        img_array = cv2.resize(img_array, (new_width, new_height),
-                              interpolation=cv2.INTER_AREA)
-
-    # Convert RGB to BGR for OpenCV
-    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    else:
-        img_bgr = img_array
-
-    # Run OCR (cls=False for receipts - they're usually upright)
-    ocr_result = ocr_engine.ocr(img_bgr, cls=False)
-
-    # Extract text
-    all_text = []
-    if ocr_result and ocr_result[0]:
-        for line in ocr_result[0]:
-            text = line[1][0]
-            all_text.append(text)
-
-    return '\n'.join(all_text)
-
-def process_file_from_bytes(file_bytes, filename, ocr_engine):
-    """
-    Process file from bytes (PDF or image)
-
-    Args:
-        file_bytes: File content as bytes
-        filename: Original filename
-        ocr_engine: PaddleOCR instance
-
-    Returns:
-        dict: Results in standard format
-    """
-    import tempfile
+    import cv2
     from PIL import Image
-    from io import BytesIO
-    from pdf2image import convert_from_path
-    import os
 
-    # Determine file type
-    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+    if isinstance(img, Image.Image):
+        # Resize while still in PIL (faster)
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
-    if ext in ['jpg', 'jpeg', 'png']:
-        # Process as image
-        img = Image.open(BytesIO(file_bytes))
-        raw_text = process_image(img, ocr_engine)
+        # Convert RGBA to RGB if needed
+        if img.mode == 'RGBA':
+            img = img.convert('RGB')
 
-        return {
-            'filename': filename,
-            'total_pages': 1,
-            'pages': [{
-                'page_number': 1,
-                'raw_text': raw_text
-            }]
-        }
+        # Convert directly to BGR for OpenCV
+        img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+    return img
+
+
+# -----------------------
+# PDF → Images (FAST, GPU friendly)
+# -----------------------
+def pdf_to_images(pdf_bytes):
+    import pypdfium2 as pdfium
+    from PIL import Image
+
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    images = []
+
+    for page in pdf:
+        pil = page.render_to(
+            pdfium.BitmapConv.pil_image,
+            scale=2.0
+        )
+        images.append(pil)
+
+    return images
+
+
+# -----------------------
+# Core OCR logic (BATCHED)
+# -----------------------
+def ocr_images(images, ocr_engine, max_batch=16):
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Parallel CPU preprocessing for better performance
+    if len(images) > 1:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            batch = list(executor.map(preprocess_image, images))
     else:
-        # Process as PDF - requires temp file
-        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
-            tmp_file.write(file_bytes)
-            tmp_path = tmp_file.name
+        batch = [preprocess_image(images[0])]
 
+    # Process in chunks if too many images to prevent OOM
+    if len(batch) > max_batch:
+        all_results = []
+        for i in range(0, len(batch), max_batch):
+            chunk = batch[i:i+max_batch]
+            try:
+                results = ocr_engine.ocr(chunk, cls=False)
+                all_results.extend(results)
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logger.warning(f"OOM on chunk {i//max_batch + 1}, falling back to single image processing")
+                    # Fallback: process images one by one
+                    for img in chunk:
+                        results = ocr_engine.ocr([img], cls=False)
+                        all_results.extend(results)
+                else:
+                    raise
+        results = all_results
+    else:
         try:
-            # Use 150 DPI for faster processing (200-300 for higher quality)
-            pages = convert_from_path(tmp_path, dpi=150)
+            results = ocr_engine.ocr(batch, cls=False)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("OOM detected, falling back to single image processing")
+                # Fallback: process images one by one
+                results = []
+                for img in batch:
+                    result = ocr_engine.ocr([img], cls=False)
+                    results.extend(result)
+            else:
+                raise
 
-            results = {
-                'filename': filename,
-                'total_pages': len(pages),
-                'pages': [None] * len(pages)  # Pre-allocate list
+    pages = []
+    for i, page in enumerate(results):
+        text = []
+        if page:
+            for line in page:
+                text.append(line[1][0])
+
+        pages.append({
+            "page_number": i + 1,
+            "raw_text": "\n".join(text)
+        })
+
+    return pages
+
+
+# -----------------------
+# RunPod handler
+# -----------------------
+def handler(job):
+    try:
+        import requests
+        from PIL import Image
+
+        job_input = job.get("input", {})
+        url = job_input.get("pdf_url")
+
+        if not url:
+            return {"error": "Missing pdf_url"}
+
+        filename = job_input.get("filename", "document.pdf")
+
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+
+        ocr_engine = get_ocr()
+
+        # Image
+        if url.lower().endswith((".jpg", ".jpeg", ".png")):
+            img = Image.open(BytesIO(resp.content))
+            pages = ocr_images([img], ocr_engine)
+            return {
+                "filename": filename,
+                "total_pages": 1,
+                "pages": pages
             }
 
-            # With 24GB VRAM, we can process multiple pages in parallel safely
-            # Use smaller worker pool to avoid memory conflicts
-            if len(pages) > 1:
-                max_workers = min(3, len(pages))  # 3 concurrent workers for 24GB VRAM
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_page = {
-                        executor.submit(process_image, page, ocr_engine): page_num
-                        for page_num, page in enumerate(pages)
-                    }
+        # PDF
+        images = pdf_to_images(resp.content)
+        pages = ocr_images(images, ocr_engine)
 
-                    for future in as_completed(future_to_page):
-                        page_num = future_to_page[future]
-                        try:
-                            raw_text = future.result()
-                            results['pages'][page_num] = {
-                                'page_number': page_num + 1,
-                                'raw_text': raw_text
-                            }
-                        except Exception as e:
-                            logger.error(f"OCR failed for page {page_num + 1}: {e}")
-                            results['pages'][page_num] = {
-                                'page_number': page_num + 1,
-                                'raw_text': '',
-                                'error': str(e)
-                            }
-            else:
-                # Single page
-                raw_text = process_image(pages[0], ocr_engine)
-                results['pages'][0] = {
-                    'page_number': 1,
-                    'raw_text': raw_text
-                }
-
-            return results
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-def handler(job):
-    """RunPod handler function"""
-    try:
-        # Import here to avoid startup failures
-        from pdf2image import convert_from_path
-        import cv2
-        import numpy as np
-        import requests
-        from io import BytesIO
-        import tempfile
-
-        job_input = job.get('input', {})
-
-        # Validate input
-        if 'pdf_url' not in job_input:
-            error_msg = 'Missing required field: pdf_url (can be PDF or image URL)'
-            logger.error(error_msg)
-            return {'error': error_msg}
-
-        pdf_url = job_input['pdf_url']
-        default_filename = 'receipt.jpg' if is_image_url(pdf_url) else 'document.pdf'
-        filename = job_input.get('filename', default_filename)
-
-        try:
-            # Download and process file
-            response = requests.get(pdf_url, timeout=30)
-            response.raise_for_status()
-
-            ocr_engine = get_ocr()
-            results = process_file_from_bytes(response.content, filename, ocr_engine)
-            return results
-
-        except Exception as e:
-            logger.error(f"Processing failed for {filename}: {e}\n{traceback.format_exc()}")
-            return {'error': str(e)}
+        return {
+            "filename": filename,
+            "total_pages": len(pages),
+            "pages": pages
+        }
 
     except Exception as e:
-        logger.error(f"Handler failed: {e}\n{traceback.format_exc()}")
-        return {'error': str(e)}
+        logger.error(traceback.format_exc())
+        return {"error": str(e)}
 
-# Start RunPod serverless handler
+
+# -----------------------
+# Start RunPod
+# -----------------------
 if __name__ == "__main__":
-    try:
-        import runpod
-        runpod.serverless.start({"handler": handler})
-    except Exception as e:
-        logger.error(f"Failed to start RunPod handler: {e}\n{traceback.format_exc()}")
-        sys.exit(1)
+    import runpod
+    runpod.serverless.start({"handler": handler})
