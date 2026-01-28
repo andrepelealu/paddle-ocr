@@ -1,4 +1,13 @@
-FROM python:3.11-slim-bullseye
+# Use CUDA-enabled base image for GPU support
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+# Install Python 3.11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-distutils \
+    python3-pip \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
