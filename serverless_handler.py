@@ -88,16 +88,14 @@ def preprocess_image(img, max_dim=2560):
 # -----------------------
 def pdf_to_images(pdf_bytes):
     import pypdfium2 as pdfium
-    from PIL import Image
 
     pdf = pdfium.PdfDocument(pdf_bytes)
     images = []
 
     for page in pdf:
-        pil = page.render_to(
-            pdfium.BitmapConv.pil_image,
-            scale=2.0
-        )
+        # Render page to bitmap then convert to PIL
+        bitmap = page.render(scale=2.0)
+        pil = bitmap.to_pil()
         images.append(pil)
 
     return images
